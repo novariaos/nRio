@@ -1,0 +1,22 @@
+variables:
+  CC: gcc
+  LD: ld
+  CFLAGS: -I./include/ -fno-stack-protector -m64 -mcmodel=large -nostdlib -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -c -ffreestanding
+  LDFLAGS: -nostdlib -m elf_x86_64 -T link.ld -z noexecstack
+  BUILD_DIR: ../../build
+  MODULE_OUT: nRio.ko
+
+targets:
+  all:
+    deps: [module]
+    cmds:
+      - "rm -rf *.o"
+
+  main.o:
+    cmds:
+      - "${CC} ${CFLAGS} src/main.c -o main.o"
+  
+  module:
+    deps: [main.o]
+    cmds:
+      - "${LD} ${LDFLAGS} -o ${MODULE_OUT} main.o"
