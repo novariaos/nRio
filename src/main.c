@@ -13,10 +13,10 @@
 #define MASTER_RATIO_MASTER_STACK 60
 
 /* Colors (ARGB) */
-#define COLOR_BORDER_NORMAL  0x5F5F5F
-#define COLOR_WINDOW_BG      0x2C2C2C
-#define COLOR_BAR_BG         0x3C3C3C
-#define COLOR_EMPTY_DESKTOP  0x2A2825
+#define COLOR_BORDER_NORMAL  0x928374
+#define COLOR_WINDOW_BG      0x282828
+#define COLOR_BAR_BG         0x1d2021
+#define COLOR_EMPTY_DESKTOP  0x3c3836
 
 /* Layout types */
 typedef enum {
@@ -47,7 +47,7 @@ typedef struct {
 /* Calculated window position on screen */
 typedef struct {
     uint32_t x, y, width, height;
-    uint32_t pid; /* for future use */
+    uint32_t pid;
 } window_position_t;
 
 /* Workspace state */
@@ -68,6 +68,12 @@ static uint32_t* g_framebuffer = NULL;
 static uint32_t g_fb_width = 0;
 static uint32_t g_fb_height = 0;
 static uint32_t g_fb_pitch_pixels = 0;
+
+/* Previous state for incremental redraw */
+static window_position_t g_prev_positions[MAX_WINDOWS_PER_WORKSPACE];
+static uint32_t g_prev_window_count = 0;
+static layout_type_t g_prev_layout = LAYOUT_GRID;
+static uint32_t g_prev_focused = 0;
 
 /* Predefined layouts */
 static const layout_config_t DEFAULT_LAYOUTS[LAYOUT_COUNT] = {
@@ -325,37 +331,48 @@ static void draw_empty_desktop_indicator(void) {
     }
 }
 
-static void redraw_all(void) {
-    clear_screen();
-    draw_top_bar();
-
+static void redraw_incremental(void) {
     workspace_t* ws = &g_workspaces[g_active_workspace];
 
-    if (ws->window_count == 0) {
-        draw_empty_desktop_indicator();
-        return;
+    if (ws->window_count != g_prev_window_count || ws->layout.type != g_prev_layout) {
+
+        for (uint32_t i = 0; i < g_prev_window_count; i++) {
+            fill_rect(g_prev_positions[i].x, g_prev_positions[i].y,
+                     g_prev_positions[i].width, g_prev_positions[i].height,
+                     COLOR_BAR_BG);
+        }
+        
+        if (ws->window_count == 0) {
+            draw_empty_desktop_indicator();
+        } else {
+            window_position_t positions[MAX_WINDOWS_PER_WORKSPACE];
+            compute_window_positions(positions, ws->window_count, &ws->layout);
+            
+            for (uint32_t i = 0; i < ws->window_count; i++) {
+                positions[i].pid = ws->windows[i].pid;
+                draw_window_frame(&positions[i], ws->layout.border_size,
+                                ws->layout.border_color,
+                                i == ws->focused_window_index);
+                g_prev_positions[i] = positions[i];
+            }
+        }
+        
+        g_prev_window_count = ws->window_count;
+        g_prev_layout = ws->layout.type;
+        g_prev_focused = ws->focused_window_index;
     }
 
-    window_position_t positions[MAX_WINDOWS_PER_WORKSPACE];
-    compute_window_positions(positions, ws->window_count, &ws->layout);
+    else if (ws->focused_window_index != g_prev_focused) {
+        window_position_t positions[MAX_WINDOWS_PER_WORKSPACE];
+        compute_window_positions(positions, ws->window_count, &ws->layout);
 
-    if (ws->layout.type == LAYOUT_FULLSCREEN) {
-        draw_window_frame(
-            &positions[ws->focused_window_index],
-            ws->layout.border_size,
-            ws->layout.border_color,
-            1
-        );
-    } else {
-        for (uint32_t i = 0; i < ws->window_count; i++) {
-            positions[i].pid = ws->windows[i].pid;
-            draw_window_frame(
-                &positions[i],
-                ws->layout.border_size,
-                ws->layout.border_color,
-                i == ws->focused_window_index
-            );
-        }
+        draw_window_frame(&positions[g_prev_focused], ws->layout.border_size,
+                         ws->layout.border_color, 0);
+
+        draw_window_frame(&positions[ws->focused_window_index], ws->layout.border_size,
+                         ws->layout.border_color, 1);
+
+        g_prev_focused = ws->focused_window_index;
     }
 }
 
@@ -386,7 +403,7 @@ static void add_window_to_current_workspace(const char* title) {
     win->pid = ws->window_count;
     ws->window_count++;
     ws->focused_window_index = ws->window_count - 1;
-    redraw_all();
+    redraw_incremental();
 }
 
 static void close_current_window(void) {
@@ -405,7 +422,7 @@ static void close_current_window(void) {
         ws->focused_window_index = ws->window_count - 1;
     }
 
-    redraw_all();
+    redraw_incremental();
 }
 
 static void cycle_focus(int direction) {
@@ -417,7 +434,7 @@ static void cycle_focus(int direction) {
     } else {
         ws->focused_window_index = (ws->focused_window_index + ws->window_count - 1) % ws->window_count;
     }
-    redraw_all();
+    redraw_incremental();
 }
 
 static void cycle_layout(void) {
@@ -425,7 +442,7 @@ static void cycle_layout(void) {
     layout_type_t current = ws->layout.type;
     layout_type_t next = (current + 1) % LAYOUT_COUNT;
     ws->layout = DEFAULT_LAYOUTS[next];
-    redraw_all();
+    redraw_incremental();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -459,14 +476,21 @@ static void on_close_window(void* unused) {
 void _start(struct kernel_api* kernel_api) {
     g_api = kernel_api;
 
+    clear_screen();
+
     g_framebuffer = g_api->get_framebuffer();
     g_api->get_fb_dimensions(&g_fb_width, &g_fb_height, &g_fb_pitch_pixels);
     g_fb_pitch_pixels = g_api->get_fb_pitch_pixels();
 
     initialize_workspaces();
-    redraw_all();
 
-    g_api->keyboard_register_hotkey(0x21, 1, on_cycle_focus_next, NULL);
+    g_prev_window_count = 0;
+    g_prev_layout = LAYOUT_GRID;
+    g_prev_focused = 0;
+
+    redraw_incremental();
+
+    g_api->keyboard_register_hotkey(0x20, 1, on_cycle_focus_next, NULL);
     g_api->keyboard_register_hotkey(0x26, 1, on_cycle_layout, NULL);
     g_api->keyboard_register_hotkey(0x10, 1, on_close_window, NULL);
     g_api->keyboard_register_hotkey(0x11, 1, on_new_window, NULL);
